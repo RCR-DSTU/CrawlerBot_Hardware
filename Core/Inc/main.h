@@ -36,7 +36,64 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+typedef struct {
+	uint8_t pid_on;
+	uint8_t pid_finish;
+	double output;
+	double error;
+	double sum_error;
+	double prev_error;
+	double current;
+	double target;
+	double error_end;
+	double max_error;
+	double min_error;
+	double p_k;
+	double i_k;
+	double d_k;
+}PID_parameters_t;
 
+typedef struct {
+	volatile uint32_t *pwm;
+	volatile uint32_t *period;
+	GPIO_TypeDef* GPIOx;
+	uint16_t GPIO_Pin;
+}Engine_parameters_t;
+
+typedef struct {
+	Engine_parameters_t left_crawler_engine;
+	Engine_parameters_t right_crawler_engine;
+	Engine_parameters_t skis_crawler_engine;
+	void (*set_voltage)(Engine_parameters_t engine, double duty);
+}Engine_t;
+
+typedef struct {
+	PID_parameters_t speed_left_regulator;
+	PID_parameters_t speed_right_regulator;
+	PID_parameters_t track_regulator;
+	void (*get_new_data)(PID_parameters_t *param);
+	void (*step)(PID_parameters_t *param);
+	void (*output)(Engine_t engine);
+}Regulator_t;
+
+typedef struct {
+	uint8_t kinematic_on;
+	double robot_target_moving[3];
+}Kinematic_t;
+
+typedef struct {
+	volatile uint32_t *counter;
+	int16_t encoder_data;
+	double line_speed;
+	double distanse;
+}Encoder_t;
+
+extern Engine_t engines;
+extern Kinematic_t kinematic;
+extern Encoder_t left_crawler_encoder;
+extern Encoder_t right_crawler_encoder;
+extern Encoder_t skis_crawler_encoder;
+extern Regulator_t regulator;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -46,7 +103,8 @@ extern "C" {
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
-
+#define PID_START(PID) PID.pid_on = 1;
+#define PID_STOP(PID)  PID.pid_on = 0;
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
@@ -57,6 +115,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define ENGINE1_DIR_Pin GPIO_PIN_7
+#define ENGINE1_DIR_GPIO_Port GPIOA
+#define ENGINE2_DIR_Pin GPIO_PIN_0
+#define ENGINE2_DIR_GPIO_Port GPIOB
+#define ENGINE3_DIR_Pin GPIO_PIN_1
+#define ENGINE3_DIR_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

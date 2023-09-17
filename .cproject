@@ -87,4 +87,5 @@
 			<resource resourceType="PROJECT" workspacePath="/Track_robot"/>
 		</configuration>
 	</storageModule>
+	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
 </cproject>
