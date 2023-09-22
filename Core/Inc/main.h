@@ -74,11 +74,22 @@ typedef struct {
 	void (*get_new_data)(PID_parameters_t *param);
 	void (*step)(PID_parameters_t *param);
 	void (*output)(Engine_t engine);
+	void (*on)(PID_parameters_t *pid);
+	void (*off)(PID_parameters_t *pid);
 }Regulator_t;
 
 typedef struct {
 	uint8_t kinematic_on;
-	double robot_target_moving[3];
+	float target_moving[3];
+	float current_moving[3];
+	float kinematic_out[3];
+}Kinematic_parameters_t;
+
+typedef struct {
+	Kinematic_parameters_t crawler;
+	void (*set)(Kinematic_parameters_t kinematic, float Vx, float Vy, float angular);
+	void (*inverse)(Kinematic_parameters_t kinematic);
+	void (*direct)(Kinematic_parameters_t kinematic);
 }Kinematic_t;
 
 typedef struct {

@@ -133,6 +133,15 @@ SECTIONS
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
 
+  .micro_ros :
+  {
+    . = ALIGN(4);
+    *(.micro_ros)         /* .micro_ros sections (constants, strings, etc.) */
+    *(.micro_ros*)        /* .micro_ros* sections (constants, strings, etc.) */
+    . = ALIGN(4);
+  } >FLASH
+	
+
   /* Initialized data sections goes into RAM, load LMA copy after code */
   .data : 
   {

@@ -39,11 +39,11 @@
 #include <geometry_msgs/msg/Twist.h>
 #include <diagnostic_msgs/msg/diagnostic_array.h>
 #include <nav_msgs/msg/odometry.h>
+
+#include "kinematics.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
-typedef StaticTask_t osStaticThreadDef_t;
-typedef StaticSemaphore_t osStaticMutexDef_t;
 /* USER CODE BEGIN PTD */
 static struct {
 	/*---------------------ROBOT-GENERAL-------------------------*/
@@ -104,35 +104,22 @@ const osThreadAttr_t microROS_attributes = {
 };
 /* Definitions for RobotProcess */
 osThreadId_t RobotProcessHandle;
-uint32_t RobotProcessBuffer[ 128 ];
-osStaticThreadDef_t RobotProcessControlBlock;
 const osThreadAttr_t RobotProcess_attributes = {
   .name = "RobotProcess",
-  .cb_mem = &RobotProcessControlBlock,
-  .cb_size = sizeof(RobotProcessControlBlock),
-  .stack_mem = &RobotProcessBuffer[0],
-  .stack_size = sizeof(RobotProcessBuffer),
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for RestartTask */
 osThreadId_t RestartTaskHandle;
-uint32_t RestartTaskBuffer[ 128 ];
-osStaticThreadDef_t RestartTaskControlBlock;
 const osThreadAttr_t RestartTask_attributes = {
   .name = "RestartTask",
-  .cb_mem = &RestartTaskControlBlock,
-  .cb_size = sizeof(RestartTaskControlBlock),
-  .stack_mem = &RestartTaskBuffer[0],
-  .stack_size = sizeof(RestartTaskBuffer),
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for Synchronize_flag */
 osMutexId_t Synchronize_flagHandle;
-osStaticMutexDef_t Synchronize_flagControlBlock;
 const osMutexAttr_t Synchronize_flag_attributes = {
-  .name = "Synchronize_flag",
-  .cb_mem = &Synchronize_flagControlBlock,
-  .cb_size = sizeof(Synchronize_flagControlBlock),
+  .name = "Synchronize_flag"
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -143,6 +130,8 @@ static void engines_init(void);
 static void sensors_init(void);
 static void regulator_calc(PID_parameters_t *param);
 static void regulator_get_data(PID_parameters_t *param);
+static void regulator_on(PID_parameters_t *pid);
+static void regulator_off(PID_parameters_t *pid);
 static void set_voltage(Engine_parameters_t engine, double duty);
 static void ros_init(void);
 static void ros_deinit(void);
@@ -188,9 +177,11 @@ void MX_FREERTOS_Init(void) {
   /* Create the mutex(es) */
   /* creation of Synchronize_flag */
   Synchronize_flagHandle = osMutexNew(&Synchronize_flag_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
+
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
@@ -265,8 +256,10 @@ void Robot_processTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-
-    osDelay(1);
+	 if(robot.start_flag == 1)
+	 {
+		 robot.kinematic.inverse(robot.kinematic.crawler);
+	 }
   }
   /* USER CODE END Robot_processTask */
 }
@@ -285,9 +278,12 @@ void Restart_processTask(void *argument)
   for(;;)
   {
 	ulTaskNotifyTake(1, portMAX_DELAY);
-
-
-	ros_deinit();
+	if(robot.start_flag == 0)
+	{
+		ros_deinit();
+		osDelay(1000 / portTICK_RATE_MS);
+		ros_init();
+	}
   }
   /* USER CODE END Restart_processTask */
 }
@@ -340,15 +336,21 @@ static void regulator_init(void)
 	robot.regulator.track_regulator.min_error = 0.01;
 	robot.regulator.track_regulator.pid_on = 0;
 	robot.regulator.track_regulator.pid_finish = 0;
+
 	robot.regulator.get_new_data = &regulator_get_data;
 	robot.regulator.step = &regulator_calc;
+	robot.regulator.on = &regulator_on;
+	robot.regulator.off = &regulator_off;
 }
 
 static void kinematic_init(void)
 {
-	robot.kinematic.robot_target_moving[0] = 0.00;
-	robot.kinematic.robot_target_moving[1] = 0.00;
-	robot.kinematic.robot_target_moving[2] = 0.00;
+	robot.kinematic.crawler.target_moving[0] = 0.00;
+	robot.kinematic.crawler.target_moving[1] = 0.00;
+	robot.kinematic.crawler.target_moving[2] = 0.00;
+	robot.kinematic.inverse = &reverse_kinematic;
+	robot.kinematic.direct = &direct_kinematic;
+	robot.kinematic.set = &set_kinematic_target;
 }
 
 static void engines_init(void)
@@ -392,7 +394,10 @@ static void sensors_init(void)
 
 static void regulator_calc(PID_parameters_t *param)
 {
+	if(param->pid_on)
+	{
 
+	}
 
 
 }
@@ -400,7 +405,21 @@ static void regulator_calc(PID_parameters_t *param)
 static void regulator_get_data(PID_parameters_t *param)
 {
 
+}
 
+static void regulator_on(PID_parameters_t *pid)
+{
+	pid->pid_on = 1;
+}
+
+static void regulator_off(PID_parameters_t *pid)
+{
+	pid->pid_on = 0;
+	pid->error = 0.00;
+	pid->output = 0.00;
+	pid->sum_error = 0.00;
+	pid->target = 0.00;
+	pid->prev_error = 0.00;
 }
 
 void subscription_callback(const void* msgin)
@@ -422,12 +441,19 @@ static void ros_sync(void)
 
 	if(RMW_RET_OK != ping_result)
 	{
+		robot.start_flag = 0;
 		xTaskNotifyGive(RestartTaskHandle);
 	}
 }
 
 static void ros_process(void)
 {
+	robot.odometry_msg.pose.pose.position.x = 0.2;
+	robot.odometry_msg.pose.pose.position.y = 0.2;
+	robot.odometry_msg.pose.pose.position.z = 0.2;
+	robot.odometry_msg.header.stamp.nanosec = robot.time_ns;
+	robot.odometry_msg.header.stamp.sec = robot.time_ms / 1000;
+	robot.odometry_msg.header.frame_id.data = "Encoder";
     robot.ret = rcl_publish(&robot.odometry_publisher, &robot.odometry_msg, NULL);
     rclc_executor_spin_some(
       &robot.executor,
@@ -445,9 +471,9 @@ static void ros_diagnostic_process(void)
 
 		robot.diagnostic_msg.header.stamp.sec = (int32_t)(robot.time_ms / 1000);
 		robot.diagnostic_msg.header.stamp.nanosec = (uint32_t)(robot.time_ns);
-
 		robot.diagnostic_msg.header.frame_id.data = "[CRAWLER:GENERAL] NO ERRORS";
-
+		robot.diagnostic_msg.status.data->message.data = "frfr";
+		robot.diagnostic_msg.status.data->level = 0;
 		robot.ret = rcl_publish(&robot.diagnostic_publisher, &robot.diagnostic_msg, NULL);
 	}
 }
@@ -468,18 +494,18 @@ static void ros_init(void)
 	  freeRTOS_allocator.reallocate = microros_reallocate;
 	  freeRTOS_allocator.zero_allocate =  microros_zero_allocate;
 
-	  if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
-	      printf("Error on default allocators (line %d)\n", __LINE__);
-	  }
+	  if (!rcutils_set_default_allocator(&freeRTOS_allocator)) { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 	  // micro-ROS app
 
 	  robot.allocator = rcl_get_default_allocator();
 
 	  //create init_options
-	  rclc_support_init(&robot.support, 0, NULL, &robot.allocator);
+	  robot.ret = rclc_support_init(&robot.support, 0, NULL, &robot.allocator);
+	  if(robot.ret != RCL_RET_OK) { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 
 	  // create node
-	  rclc_node_init_default(&robot.node, "CrawlerBot_node", "", &robot.support);
+	  robot.ret = rclc_node_init_default(&robot.node, "CrawlerBot_node", "", &robot.support);
+	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 
 	  // create publisher
 	  robot.ret = rclc_publisher_init_default(
@@ -487,18 +513,21 @@ static void ros_init(void)
 					&robot.node,
 					ROSIDL_GET_MSG_TYPE_SUPPORT(diagnostic_msgs, msg, DiagnosticArray),
 					"CrawlerRobot/diagnostic");
+	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 
 	  robot.ret = rclc_publisher_init_default(
 					&robot.odometry_publisher,
 					&robot.node,
 					ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
 					"CrawlerRobot/odometry");
+	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 
 	  robot.ret = rclc_subscription_init_default(
 					&robot.geometry_subscriber,
 					&robot.node,
 					ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-					"CrawlerRobot/Twist");
+					"CrawlerRobot/twist");
+	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 
 	  robot.executor = rclc_executor_get_zero_initialized_executor();
 	  robot.ret = rclc_executor_init(
@@ -506,6 +535,7 @@ static void ros_init(void)
 					&robot.support.context,
 					1,
 					&robot.allocator);
+	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 
 	  robot.ret = rclc_executor_add_subscription(
 				    &robot.executor,
@@ -513,6 +543,7 @@ static void ros_init(void)
 				    &robot.geometry_msg,
 				    &subscription_callback,
 				    ON_NEW_DATA);
+	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 }
 
 static void ros_deinit(void)
