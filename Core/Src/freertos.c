@@ -66,11 +66,11 @@ static struct {
 	int64_t time_ms;
 	int64_t time_ns;
 	/*---------------------ROS OBJECTS---------------------------*/
+	rcl_allocator_t allocator;
 	rcl_publisher_t diagnostic_publisher;
 	rcl_subscription_t geometry_subscriber;
 	rcl_publisher_t odometry_publisher;
 	rclc_support_t support;
-	rcl_allocator_t allocator;
 	rcl_node_t node;
 	rclc_executor_t executor;
 	/*---------------------MESSAGES---------------------------*/
@@ -88,7 +88,22 @@ static struct {
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){robot.start_flag = 0; return false;}}
+#define MICRO_ROS_ALLOCATE	do { \
+		rmw_uros_set_custom_transport(\
+			true,\
+			(void *) &huart1,\
+			cubemx_transport_open,\
+			cubemx_transport_close,\
+			cubemx_transport_write,\
+			cubemx_transport_read);\
+		rcl_allocator_t freeRTOS_allocator = rcutils_get_zero_initialized_allocator();\
+		freeRTOS_allocator.allocate = microros_allocate;\
+		freeRTOS_allocator.deallocate = microros_deallocate;\
+		freeRTOS_allocator.reallocate = microros_reallocate;\
+		freeRTOS_allocator.zero_allocate =  microros_zero_allocate;\
+		if (!rcutils_set_default_allocator(&freeRTOS_allocator)) { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }\
+} while(0)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -133,7 +148,7 @@ static void regulator_get_data(PID_parameters_t *param);
 static void regulator_on(PID_parameters_t *pid);
 static void regulator_off(PID_parameters_t *pid);
 static void set_voltage(Engine_parameters_t engine, double duty);
-static void ros_init(void);
+static bool ros_init(void);
 static void ros_deinit(void);
 static void ros_process(void);
 static void ros_sync(void);
@@ -227,7 +242,9 @@ void microROSTask(void *argument)
 {
   /* USER CODE BEGIN microROSTask */
   /* Infinite loop */
-	ros_init();
+	MICRO_ROS_ALLOCATE;
+	bool state = ros_init();
+	if(state != true) xTaskNotifyGive(RestartTaskHandle);
 	/*!
 	 * @info ROS application:
 	 * 	1) Ping agent
@@ -235,10 +252,12 @@ void microROSTask(void *argument)
 	 */
 	for(;;)
 	{
-		ros_sync();
-		ros_process();
-
-		ros_diagnostic_process();
+		if(robot.start_flag == 1)
+		{
+			ros_sync();
+			ros_process();
+			ros_diagnostic_process();
+		} else xTaskNotifyGive(RestartTaskHandle);
 	}
   /* USER CODE END microROSTask */
 }
@@ -280,9 +299,7 @@ void Restart_processTask(void *argument)
 	ulTaskNotifyTake(1, portMAX_DELAY);
 	if(robot.start_flag == 0)
 	{
-		ros_deinit();
-		osDelay(1000 / portTICK_RATE_MS);
-		ros_init();
+		HAL_NVIC_SystemReset();
 	}
   }
   /* USER CODE END Restart_processTask */
@@ -434,8 +451,8 @@ void subscription_callback(const void* msgin)
  */
 static void ros_sync(void)
 {
-	const int timeout_ms = 50;
-	const uint8_t attempts = 5;
+	const int timeout_ms = 100;
+	const uint8_t attempts = 1;
 
 	rmw_ret_t ping_result = rmw_uros_ping_agent(timeout_ms, attempts);
 
@@ -443,7 +460,7 @@ static void ros_sync(void)
 	{
 		robot.start_flag = 0;
 		xTaskNotifyGive(RestartTaskHandle);
-	}
+	} else robot.start_flag = 1;
 }
 
 static void ros_process(void)
@@ -451,9 +468,6 @@ static void ros_process(void)
 	robot.odometry_msg.pose.pose.position.x = 0.2;
 	robot.odometry_msg.pose.pose.position.y = 0.2;
 	robot.odometry_msg.pose.pose.position.z = 0.2;
-	robot.odometry_msg.header.stamp.nanosec = robot.time_ns;
-	robot.odometry_msg.header.stamp.sec = robot.time_ms / 1000;
-	robot.odometry_msg.header.frame_id.data = "Encoder";
     robot.ret = rcl_publish(&robot.odometry_publisher, &robot.odometry_msg, NULL);
     rclc_executor_spin_some(
       &robot.executor,
@@ -472,90 +486,67 @@ static void ros_diagnostic_process(void)
 		robot.diagnostic_msg.header.stamp.sec = (int32_t)(robot.time_ms / 1000);
 		robot.diagnostic_msg.header.stamp.nanosec = (uint32_t)(robot.time_ns);
 		robot.diagnostic_msg.header.frame_id.data = "[CRAWLER:GENERAL] NO ERRORS";
-		robot.diagnostic_msg.status.data->message.data = "frfr";
-		robot.diagnostic_msg.status.data->level = 0;
 		robot.ret = rcl_publish(&robot.diagnostic_publisher, &robot.diagnostic_msg, NULL);
 	}
 }
 
-static void ros_init(void)
+static bool ros_init(void)
 {
-	  rmw_uros_set_custom_transport(
-	    true,
-	    (void *) &huart1,
-	    cubemx_transport_open,
-	    cubemx_transport_close,
-	    cubemx_transport_write,
-	    cubemx_transport_read);
-
-	  rcl_allocator_t freeRTOS_allocator = rcutils_get_zero_initialized_allocator();
-	  freeRTOS_allocator.allocate = microros_allocate;
-	  freeRTOS_allocator.deallocate = microros_deallocate;
-	  freeRTOS_allocator.reallocate = microros_reallocate;
-	  freeRTOS_allocator.zero_allocate =  microros_zero_allocate;
-
-	  if (!rcutils_set_default_allocator(&freeRTOS_allocator)) { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
 	  // micro-ROS app
-
-	  robot.allocator = rcl_get_default_allocator();
-
+	  if(RMW_RET_OK != rmw_uros_ping_agent(100, 1)) return false;
 	  //create init_options
-	  robot.ret = rclc_support_init(&robot.support, 0, NULL, &robot.allocator);
-	  if(robot.ret != RCL_RET_OK) { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+	  RCCHECK(rclc_support_init(&robot.support, 0, NULL, &allocator));
 
 	  // create node
-	  robot.ret = rclc_node_init_default(&robot.node, "CrawlerBot_node", "", &robot.support);
-	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+	  RCCHECK(rclc_node_init_default(&robot.node, "CrawlerBot_node", "", &robot.support));
 
 	  // create publisher
-	  robot.ret = rclc_publisher_init_default(
+	  RCCHECK(rclc_publisher_init_default(
 					&robot.diagnostic_publisher,
 					&robot.node,
 					ROSIDL_GET_MSG_TYPE_SUPPORT(diagnostic_msgs, msg, DiagnosticArray),
-					"CrawlerRobot/diagnostic");
-	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+					"CrawlerBot/diagnostic"));
 
-	  robot.ret = rclc_publisher_init_default(
+	  RCCHECK(rclc_publisher_init_default(
 					&robot.odometry_publisher,
 					&robot.node,
 					ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
-					"CrawlerRobot/odometry");
-	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+					"CrawlerBot/odometry"));
 
-	  robot.ret = rclc_subscription_init_default(
+	  RCCHECK(rclc_subscription_init_default(
 					&robot.geometry_subscriber,
 					&robot.node,
 					ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-					"CrawlerRobot/twist");
-	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+					"CrawlerBot/twist"));
 
 	  robot.executor = rclc_executor_get_zero_initialized_executor();
-	  robot.ret = rclc_executor_init(
+	  RCCHECK(rclc_executor_init(
 			  	    &robot.executor,
 					&robot.support.context,
 					1,
-					&robot.allocator);
-	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+					&robot.allocator));
 
-	  robot.ret = rclc_executor_add_subscription(
+	  RCCHECK(rclc_executor_add_subscription(
 				    &robot.executor,
 				    &robot.geometry_subscriber,
 				    &robot.geometry_msg,
 				    &subscription_callback,
-				    ON_NEW_DATA);
-	  if(robot.ret != RCL_RET_OK)  { robot.start_flag = 0; xTaskNotifyGive(RestartTaskHandle); }
+				    ON_NEW_DATA));
+	  robot.start_flag = 1;
+	  return true;
 }
 
 static void ros_deinit(void)
 {
-	// destroy ROS pub/sub
-	robot.ret = rcl_publisher_fini(&robot.diagnostic_publisher, &robot.node);
-	robot.ret = rcl_publisher_fini(&robot.odometry_publisher, &robot.node);
-	robot.ret = rcl_subscription_fini(&robot.geometry_subscriber, &robot.node);
-	robot.ret = rclc_executor_fini(&robot.executor);
-	// destroy node, support
-	robot.ret = rcl_node_fini(&robot.node);
-	rclc_support_fini(&robot.support);
+	  rmw_context_t * rmw_context = rcl_context_get_rmw_context(&robot.support.context);
+	  (void) rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
+
+	  robot.ret = rcl_publisher_fini(&robot.diagnostic_publisher, &robot.node);
+	  robot.ret = rcl_publisher_fini(&robot.odometry_publisher, &robot.node);
+	  rclc_executor_fini(&robot.executor);
+	  robot.ret = rcl_subscription_fini(&robot.geometry_subscriber, &robot.node);
+	  robot.ret = rcl_node_fini(&robot.node);
+	  rclc_support_fini(&robot.support);
 }
 
 static void set_voltage(Engine_parameters_t engine, double duty)
